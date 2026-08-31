@@ -24,7 +24,11 @@ create index if not exists trackers_user_idx on public.trackers (user_id, positi
 
 -- ------------------------------------------------------------------ day_logs
 -- One row per tracker per day it was done. Nothing here resets or breaks.
-create table if not exists public.day_logs (
+-- Dropped explicitly: this table changed shape (activity_id -> tracker_id), and
+-- `if not exists` would silently keep the old columns on an existing project.
+drop table if exists public.day_logs cascade;
+
+create table public.day_logs (
   user_id    uuid not null references auth.users (id) on delete cascade,
   tracker_id uuid not null references public.trackers (id) on delete cascade,
   day        date not null,
