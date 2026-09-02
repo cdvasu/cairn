@@ -7,11 +7,12 @@ import NameForm from "@/components/NameForm";
 import PageState from "@/components/PageState";
 
 export default function HeatmapPage() {
-  const { status, trackers, addTracker } = useData();
+  const { status, trackers, addTracker, failure, retry } = useData();
   const [adding, setAdding] = useState(false);
 
+  if (status === "error")
+    return <PageState kind="error" detail={failure?.message} onRetry={retry} />;
   if (status === "loading") return <PageState kind="loading" />;
-  if (status === "error") return <PageState kind="error" />;
 
   return (
     <div className="mx-auto max-w-6xl">

@@ -9,9 +9,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { useRouter } from "next/navigation";
 import { supabaseBrowser } from "@/lib/supabase/client";
 import { addDays, toKey } from "@/lib/date";
 import type { DayLog, List, Todo, Tracker } from "@/lib/types";
+import { classify, type Failure } from "@/lib/errors";
 
 /** How far back the heatmaps reach. */
 export const HISTORY_DAYS = 364;
@@ -52,8 +54,14 @@ export const logKey = (trackerId: string, day: string) => `${trackerId}|${day}`;
 type Ctx = {
   userId: string;
   status: Status;
-  error: string | null;
-  dismissError: () => void;
+  failure: Failure | null;
+  dismissFailure: () => void;
+  /** Re-runs the initial load. Safe to call repeatedly. */
+  retry: () => void;
+  /** Runs a query, refreshing an expired access token once if needed. */
+  withSession: <T extends { error: unknown }>(work: () => PromiseLike<T>) => Promise<T>;
+  /** Surfaces a failure in the shared error bar; signs out only if truly stranded. */
+  report: (error: unknown) => Failure;
 
   trackers: Tracker[];
   hasLog: (trackerId: string, day: string) => boolean;
@@ -95,48 +103,107 @@ export function DataProvider({
   children: React.ReactNode;
 }) {
   const supabase = supabaseBrowser();
+  const router = useRouter();
   const [state, setState] = useState<State>(EMPTY);
   const stateRef = useRef<State>(EMPTY);
   stateRef.current = state;
   const [status, setStatus] = useState<Status>("loading");
-  const [error, setError] = useState<string | null>(null);
+  const [failure, setFailure] = useState<Failure | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const refreshing = useRef<Promise<boolean> | null>(null);
 
   const today = toKey(new Date());
   const historyStart = toKey(addDays(new Date(), -HISTORY_DAYS));
+
+  /**
+   * Trades the refresh token for a fresh access token. No email, no sign-in link
+   * — this is what keeps an expired session from becoming a dead one. Concurrent
+   * callers share the single in-flight attempt.
+   */
+  const refreshSession = useCallback(async (): Promise<boolean> => {
+    if (!refreshing.current) {
+      refreshing.current = supabase.auth
+        .refreshSession()
+        .then((result) => Boolean(result.data.session) && !result.error)
+        .finally(() => {
+          refreshing.current = null;
+        });
+    }
+    return refreshing.current;
+  }, [supabase]);
+
+  /** Runs `work`, and on a stale access token refreshes once and runs it again. */
+  const withSession = useCallback(
+    async <T extends { error: unknown }>(work: () => PromiseLike<T>): Promise<T> => {
+      const first = await work();
+      if (!first.error) return first;
+
+      if (classify(first.error).kind !== "stale-token") return first;
+      if (!(await refreshSession())) return first;
+
+      return work();
+    },
+    [refreshSession],
+  );
+
+  const report = useCallback(
+    (error: unknown): Failure => {
+      const problem = classify(error);
+      setFailure(problem);
+      if (problem.kind === "signed-out") {
+        void supabase.auth.signOut().then(() => router.replace("/login?error=session_ended"));
+      }
+      return problem;
+    },
+    [supabase, router],
+  );
+
+  const withSessionRef = useRef(withSession);
+  withSessionRef.current = withSession;
+  const reportRef = useRef(report);
+  reportRef.current = report;
 
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      const [trackers, lists, todos, logs] = await Promise.all([
-        supabase.from("trackers").select("*").order("position").order("created_at"),
-        supabase.from("lists").select("*").order("position").order("created_at"),
-        supabase.from("todos").select("*").eq("day", today).order("position"),
-        supabase.from("day_logs").select("*").gte("day", historyStart),
-      ]);
+      setStatus((current) => (current === "error" ? "loading" : current));
 
+      const load = () =>
+        Promise.all([
+          supabase.from("trackers").select("*").order("position").order("created_at"),
+          supabase.from("lists").select("*").order("position").order("created_at"),
+          supabase.from("todos").select("*").eq("day", today).order("position"),
+          supabase.from("day_logs").select("*").gte("day", historyStart),
+        ]).then((results) => ({
+          results,
+          error: results.find((r) => r.error)?.error ?? null,
+        }));
+
+      const { results, error: loadError } = await withSessionRef.current(load);
       if (cancelled) return;
 
-      const failure = trackers.error ?? lists.error ?? todos.error ?? logs.error;
-      if (failure) {
-        setError(failure.message);
+      if (loadError) {
+        if (reportRef.current(loadError).kind === "signed-out") return;
         setStatus("error");
         return;
       }
 
+      const [trackers, lists, todos, logs] = results;
       setState({
         trackers: trackers.data ?? [],
         lists: lists.data ?? [],
         todosByDay: { [today]: todos.data ?? [] },
         dayLogs: new Set((logs.data ?? []).map((l: DayLog) => logKey(l.tracker_id, l.day))),
       });
+      setFailure(null);
       setStatus("ready");
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [supabase, today, historyStart]);
+  }, [supabase, today, historyStart, attempt]);
 
   /** Optimistic write: apply locally, then persist; roll back on failure. */
   const commit = useCallback(
@@ -144,17 +211,13 @@ export function DataProvider({
       const snapshot = stateRef.current;
       setState(apply);
 
-      const { error: writeError } = await persist();
+      const { error: writeError } = await withSession(persist);
       if (writeError) {
         setState(snapshot);
-        setError(
-          typeof writeError === "object" && writeError && "message" in writeError
-            ? String((writeError as { message: unknown }).message)
-            : "Could not save that change.",
-        );
+        report(writeError);
       }
     },
-    [],
+    [withSession, report],
   );
 
   const value = useMemo<Ctx>(() => {
@@ -164,8 +227,11 @@ export function DataProvider({
     return {
       userId,
       status,
-      error,
-      dismissError: () => setError(null),
+      failure,
+      dismissFailure: () => setFailure(null),
+      retry: () => setAttempt((n) => n + 1),
+      withSession,
+      report,
 
       // ---------------------------------------------------------- heatmap
       trackers: state.trackers,
@@ -345,7 +411,7 @@ export function DataProvider({
         );
       },
     };
-  }, [state, status, error, supabase, userId, commit]);
+  }, [state, status, failure, supabase, userId, commit, withSession, report]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

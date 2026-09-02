@@ -8,7 +8,7 @@ import PageState from "@/components/PageState";
 import { formatLong, todayKey } from "@/lib/date";
 
 export default function TodoPage() {
-  const { status, lists, todosFor, addList } = useData();
+  const { status, lists, todosFor, addList, failure, retry } = useData();
   const [adding, setAdding] = useState(false);
   const day = todayKey();
   const todos = todosFor(day);
@@ -27,8 +27,11 @@ export default function TodoPage() {
     };
   }, [todos, lists]);
 
+  // Error first: a failed load leaves `todos` undefined, which would otherwise
+  // read as "still loading" and hang the page.
+  if (status === "error")
+    return <PageState kind="error" detail={failure?.message} onRetry={retry} />;
   if (status === "loading" || !todos) return <PageState kind="loading" />;
-  if (status === "error") return <PageState kind="error" />;
 
   return (
     <div className="mx-auto max-w-6xl">

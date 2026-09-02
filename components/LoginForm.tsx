@@ -6,6 +6,7 @@ import { supabaseBrowser } from "@/lib/supabase/client";
 
 const ERRORS: Record<string, string> = {
   link_expired: "That link has expired. Request a new one below.",
+  session_ended: "Your session ended. Request a new link to continue.",
   missing_code: "That link was incomplete. Request a new one below.",
 };
 

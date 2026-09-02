@@ -12,53 +12,70 @@ const SAVE_DELAY = 700;
 
 export default function JournalPage() {
   const supabase = supabaseBrowser();
-  const { userId } = useData();
+  const { userId, withSession, report } = useData();
+  const withSessionRef = useRef(withSession);
+  withSessionRef.current = withSession;
+  const reportRef = useRef(report);
+  reportRef.current = report;
   const day = todayKey();
 
   const [entries, setEntries] = useState<JournalEntry[] | null>(null);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [attempt, setAttempt] = useState(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [detail, setDetail] = useState<string | undefined>();
 
   useEffect(() => {
     let cancelled = false;
 
-    supabase
-      .from("journal_entries")
-      .select("*")
-      .order("day", { ascending: false })
-      .limit(ENTRY_LIMIT)
-      .then(({ data, error }) => {
-        if (cancelled) return;
-        if (error) {
-          setStatus("error");
-          return;
-        }
-        setEntries(data ?? []);
-        setDraft((data ?? []).find((e) => e.day === day)?.content ?? "");
-        setStatus("ready");
-      });
+    (async () => {
+      setStatus((current) => (current === "error" ? "loading" : current));
+
+      const { data, error } = await withSessionRef.current(() =>
+        supabase
+          .from("journal_entries")
+          .select("*")
+          .order("day", { ascending: false })
+          .limit(ENTRY_LIMIT),
+      );
+
+      if (cancelled) return;
+
+      if (error) {
+        setDetail(reportRef.current(error).message);
+        setStatus("error");
+        return;
+      }
+
+      setEntries(data ?? []);
+      setDraft((data ?? []).find((e) => e.day === day)?.content ?? "");
+      setStatus("ready");
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [supabase, day]);
+  }, [supabase, day, attempt]);
 
   const save = useCallback(
     async (content: string) => {
       setSaveState("saving");
-      const { data, error } = await supabase
-        .from("journal_entries")
-        .upsert(
-          { user_id: userId, day, content, updated_at: new Date().toISOString() },
-          { onConflict: "user_id,day" },
-        )
-        .select()
-        .single();
+      const { data, error } = await withSession(() =>
+        supabase
+          .from("journal_entries")
+          .upsert(
+            { user_id: userId, day, content, updated_at: new Date().toISOString() },
+            { onConflict: "user_id,day" },
+          )
+          .select()
+          .single(),
+      );
 
       if (error) {
         setSaveState("error");
+        report(error);
         return;
       }
 
@@ -68,7 +85,7 @@ export default function JournalPage() {
         return data ? [data, ...rest] : rest;
       });
     },
-    [supabase, userId, day],
+    [supabase, userId, day, withSession, report],
   );
 
   function onChange(value: string) {
@@ -90,8 +107,11 @@ export default function JournalPage() {
     [entries, day],
   );
 
+  if (status === "error")
+    return (
+      <PageState kind="error" detail={detail} onRetry={() => setAttempt((n) => n + 1)} />
+    );
   if (status === "loading") return <PageState kind="loading" />;
-  if (status === "error") return <PageState kind="error" />;
 
   return (
     <div className="mx-auto max-w-6xl">

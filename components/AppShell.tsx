@@ -21,7 +21,7 @@ export default function AppShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { error, dismissError } = useData();
+  const { failure, dismissFailure, retry } = useData();
 
   async function signOut() {
     await supabaseBrowser().auth.signOut();
@@ -86,15 +86,30 @@ export default function AppShell({
         </nav>
       </header>
 
-      {error ? (
+      {failure ? (
         <div
           role="alert"
-          className="rule flex items-center justify-between gap-4 border-b border-danger/40 bg-danger/5 px-5 py-3 sm:px-8"
+          className="rule flex flex-wrap items-center justify-between gap-x-6 gap-y-2 border-b border-danger/40 bg-danger/5 px-5 py-3 sm:px-8"
         >
-          <p className="text-xs text-danger">{error}</p>
-          <button type="button" onClick={dismissError} className="label text-faint hover:text-fg">
-            Dismiss
-          </button>
+          <p className="text-xs text-danger">{failure.message}</p>
+          <span className="flex items-center gap-5">
+            {failure.kind === "transient" ? (
+              <button
+                type="button"
+                onClick={retry}
+                className="text-[10px] tracking-[0.1em] uppercase text-fg hover:text-accent"
+              >
+                Retry
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={dismissFailure}
+              className="text-[10px] tracking-[0.1em] uppercase text-faint hover:text-fg"
+            >
+              Dismiss
+            </button>
+          </span>
         </div>
       ) : null}
 
